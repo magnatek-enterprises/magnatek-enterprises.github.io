@@ -26,8 +26,14 @@
     --danger: #d92d20;
     --danger-tint: #fdecea;
 
+    --overdue: #8a1a0f;
+    --overdue-tint: #f8d9d3;
+
     --neutral: #52525b;
     --neutral-tint: #efeff2;
+
+    --whatsapp: #25d366;
+    --whatsapp-dark: #1da851;
 
     --radius-sm: 6px;
     --radius: 10px;
@@ -277,6 +283,12 @@ a {
     color: var(--ink-faint);
 }
 
+.card-hint {
+    margin: 8px 2px 20px;
+    font-size: 12.5px;
+    color: var(--ink-faint);
+}
+
 /* =========================================================
    ADD TASK FORM
 ========================================================= */
@@ -302,6 +314,19 @@ a {
     grid-template-columns: 1fr 1fr;
     gap: 16px;
     margin-bottom: 18px;
+}
+
+.hint-box {
+    font-size: 12px;
+    color: var(--ink-faint);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    line-height: 1.5;
+    height: 44px;
+    display: flex;
+    align-items: center;
 }
 
 select,
@@ -397,6 +422,9 @@ textarea {
 
 /* =========================================================
    STATUS BADGES
+   Completed = green, Week Shifted = yellow, Pending = red.
+   Overdue gets a visually stronger/darker red treatment plus a
+   warning glyph so it is never confused with plain Pending.
 ========================================================= */
 
 .badge {
@@ -418,10 +446,65 @@ textarea {
     background: currentColor;
 }
 
-.badge.pending { background: var(--neutral-tint); color: var(--neutral); }
+.badge.pending { background: var(--danger-tint); color: var(--danger); }
 .badge.completed { background: var(--success-tint); color: var(--success); }
+.badge.week-shifted { background: var(--warning-tint); color: var(--warning); }
 .badge.due-today { background: var(--warning-tint); color: var(--warning); }
-.badge.overdue { background: var(--danger-tint); color: var(--danger); }
+
+.badge.overdue {
+    background: var(--overdue-tint);
+    color: var(--overdue);
+    border: 1px solid var(--overdue);
+    font-weight: 800;
+}
+
+.badge.overdue::before {
+    display: none;
+}
+
+/* =========================================================
+   PRIORITY CHIPS
+   Deliberately a different shape (square-ish chip, not a pill)
+   from the status badges above, so priority and status are never
+   visually confused with one another.
+========================================================= */
+
+.priority-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.priority-chip.high {
+    background: #fdecef;
+    color: #9f0c24;
+    border-color: #f3c3cc;
+}
+
+.priority-chip.medium {
+    background: #fdf1e0;
+    color: #9a5b09;
+    border-color: #f0d3a8;
+}
+
+.priority-chip.low {
+    background: #eef3fb;
+    color: #2f5fa8;
+    border-color: #cdddf3;
+}
+
+.priority-chip.none {
+    background: var(--surface-strong);
+    color: var(--ink-faint);
+    border-color: var(--border);
+}
 
 /* =========================================================
    TASK CARDS (Follow Up)
@@ -494,11 +577,15 @@ textarea {
     justify-content: space-between;
     gap: 10px;
     margin-top: 4px;
+    flex-wrap: wrap;
 }
 
 .task-meta {
     font-size: 12px;
     color: var(--ink-faint);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
 }
 
 .task-actions {
@@ -579,7 +666,7 @@ textarea {
 table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 720px;
+    min-width: 760px;
 }
 
 thead th {
@@ -668,7 +755,7 @@ td .cell-actions {
 }
 
 /* =========================================================
-   DASHBOARD - SUMMARY CARDS
+   DASHBOARD - SUMMARY CARDS (now clickable filters)
 ========================================================= */
 
 .summary-grid {
@@ -688,6 +775,27 @@ td .cell-actions {
     border-radius: var(--radius);
     padding: 18px 18px;
     box-shadow: var(--shadow-sm);
+    text-align: left;
+    font: inherit;
+    cursor: default;
+    transition: box-shadow 0.15s ease, transform 0.05s ease, border-color 0.15s ease;
+}
+
+button.stat-card {
+    cursor: pointer;
+}
+
+button.stat-card:hover {
+    box-shadow: var(--shadow);
+    transform: translateY(-1px);
+}
+
+button.stat-card:active {
+    transform: translateY(0);
+}
+
+button.stat-card.active {
+    box-shadow: 0 0 0 2px var(--brand), var(--shadow);
 }
 
 .stat-card .stat-label {
@@ -710,13 +818,17 @@ td .cell-actions {
 .stat-card.completed { border-left-color: var(--success); }
 .stat-card.completed .stat-value { color: var(--success); }
 
-.stat-card.pending { border-left-color: var(--neutral); }
+.stat-card.pending { border-left-color: var(--danger); }
+.stat-card.pending .stat-value { color: var(--danger); }
+
+.stat-card.week-shifted { border-left-color: var(--warning); }
+.stat-card.week-shifted .stat-value { color: var(--warning); }
 
 .stat-card.due-today { border-left-color: var(--warning); }
 .stat-card.due-today .stat-value { color: var(--warning); }
 
-.stat-card.overdue { border-left-color: var(--danger); }
-.stat-card.overdue .stat-value { color: var(--danger); }
+.stat-card.overdue { border-left-color: var(--overdue); }
+.stat-card.overdue .stat-value { color: var(--overdue); }
 
 /* =========================================================
    DASHBOARD - GRID SECTIONS
@@ -812,7 +924,7 @@ td .cell-actions {
 }
 
 /* =========================================================
-   PRIORITY LISTS
+   PRIORITY LISTS (Due Today / Overdue on the dashboard)
 ========================================================= */
 
 .priority-list {
@@ -855,6 +967,9 @@ td .cell-actions {
     font-size: 11.5px;
     color: var(--ink-faint);
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 
 /* =========================================================
@@ -994,7 +1109,7 @@ td .cell-actions {
 }
 
 /* =========================================================
-   DASHBOARD DATE FILTER
+   DASHBOARD / TASKS DATE + FILTER BAR
 ========================================================= */
 
 .filter-bar {
@@ -1010,6 +1125,7 @@ td .cell-actions {
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
+    width: 100%;
 }
 
 .filter-row select {
@@ -1128,6 +1244,43 @@ td .cell-actions {
 }
 
 /* =========================================================
+   DAILY PENDING TASKS / WHATSAPP
+========================================================= */
+
+.whatsapp-card {
+    margin-top: 4px;
+}
+
+.whatsapp-preview {
+    width: 100%;
+    min-height: 160px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    background: var(--surface);
+    resize: vertical;
+    margin-bottom: 16px;
+}
+
+.whatsapp-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.whatsapp-btn {
+    background: var(--whatsapp);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: auto;
+}
+
+.whatsapp-btn:hover {
+    background: var(--whatsapp-dark);
+}
+
+/* =========================================================
    MODAL (revise)
 ========================================================= */
 
@@ -1153,6 +1306,8 @@ td .cell-actions {
     width: 100%;
     max-width: 400px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    max-height: 90vh;
+    overflow-y: auto;
 }
 
 .modal-box h3 {
@@ -1236,6 +1391,234 @@ td .cell-actions {
 }
 
 /* =========================================================
+   WKNDOT (Weekly Work Not Done On Time)
+========================================================= */
+
+.wkndot-header-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* ---- Mid-week WKNDOT box, inside the Revise modal ---- */
+
+.wkndot-midweek-box {
+    margin: 4px 0 18px;
+    padding: 16px;
+    border: 1px solid var(--warning-tint);
+    background: var(--warning-tint);
+    border-radius: var(--radius);
+}
+
+.wkndot-midweek-label {
+    font-size: 12px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--warning);
+    margin-bottom: 6px;
+}
+
+.wkndot-midweek-copy {
+    margin: 0 0 14px;
+    font-size: 13px;
+    color: var(--ink-soft);
+}
+
+.wkndot-choice-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.wkndot-choice-btn {
+    appearance: none;
+    flex: 1;
+    min-width: 180px;
+    border: 2px solid var(--border);
+    background: var(--white);
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    text-align: center;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.wkndot-choice-btn.small {
+    flex: none;
+    min-width: 0;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    border-width: 1px;
+}
+
+.wkndot-choice-btn.negative {
+    color: var(--danger);
+    border-color: #f3c6c0;
+}
+
+.wkndot-choice-btn.negative:hover,
+.wkndot-choice-btn.negative.selected {
+    background: var(--danger-tint);
+    border-color: var(--danger);
+}
+
+.wkndot-choice-btn.non-negative {
+    color: var(--success);
+    border-color: #bfe3d3;
+}
+
+.wkndot-choice-btn.non-negative:hover,
+.wkndot-choice-btn.non-negative.selected {
+    background: var(--success-tint);
+    border-color: var(--success);
+}
+
+.wkndot-existing-chip {
+    display: inline-block;
+    padding: 8px 14px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.wkndot-existing-chip.negative {
+    background: var(--danger-tint);
+    color: var(--danger);
+}
+
+.wkndot-existing-chip.non-negative {
+    background: var(--success-tint);
+    color: var(--success);
+}
+
+/* ---- WKNDOT review screen: decided/undecided chips + buttons ---- */
+
+.wkndot-decided-chip {
+    display: inline-block;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.wkndot-decided-chip.negative {
+    background: var(--danger-tint);
+    color: var(--danger);
+}
+
+.wkndot-decided-chip.non-negative {
+    background: var(--success-tint);
+    color: var(--success);
+}
+
+.wkndot-review-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* ---- Printable report header (hidden on screen, shown when printing) ---- */
+
+.wkndot-print-header {
+    display: none;
+}
+
+/* =========================================================
+   PRINT / PDF (WKNDOT report)
+
+   Only the WKNDOT view's summary + table are meant to be printed.
+   Everything else (header, nav, all other views, filters, buttons)
+   is hidden. The print-only header (logo, company, week, generated
+   date) is shown instead.
+========================================================= */
+
+@media print {
+
+    body * {
+        visibility: hidden;
+    }
+
+    #wkndot,
+    #wkndot * {
+        visibility: visible;
+    }
+
+    #wkndot {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        padding: 0 12mm;
+    }
+
+    .app-header,
+    .toast-stack,
+    .modal-overlay,
+    .wkndot-hide-print {
+        display: none !important;
+    }
+
+    .wkndot-print-header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding-bottom: 14px;
+        margin-bottom: 16px;
+        border-bottom: 2px solid var(--ink);
+    }
+
+    .wkndot-print-logo {
+        height: 44px;
+    }
+
+    .wkndot-print-company {
+        font-size: 18px;
+        font-weight: 800;
+    }
+
+    .wkndot-print-title {
+        font-size: 14px;
+        font-weight: 700;
+        color: var(--ink-soft);
+    }
+
+    .wkndot-print-meta {
+        font-size: 12px;
+        color: var(--ink-soft);
+        margin-top: 2px;
+    }
+
+    .wkndot-print-summary,
+    .wkndot-print-table {
+        break-inside: avoid;
+    }
+
+    .table-wrapper {
+        overflow-x: visible;
+        border: 1px solid #000;
+    }
+
+    table {
+        min-width: 0;
+        width: 100%;
+    }
+
+    .wkndot-review-actions {
+        display: none;
+    }
+
+    @page {
+        size: A4;
+        margin: 14mm;
+    }
+}
+
+
+/* =========================================================
    TOASTS
 ========================================================= */
 
@@ -1247,6 +1630,7 @@ td .cell-actions {
     flex-direction: column;
     gap: 10px;
     z-index: 200;
+    max-width: calc(100vw - 40px);
 }
 
 .toast {
@@ -1271,6 +1655,8 @@ td .cell-actions {
 
 /* =========================================================
    RESPONSIVE
+   Desktop layout above is left untouched by these rules; they
+   only kick in at the breakpoints below.
 ========================================================= */
 
 @media (max-width: 980px) {
@@ -1295,35 +1681,121 @@ td .cell-actions {
 
 @media (max-width: 720px) {
 
+    /* ---- Header ---- */
+
     .brand-sub {
         display: none;
     }
 
-    .main-nav {
-        overflow-x: auto;
-        max-width: 60vw;
+    .header-inner {
+        gap: 10px;
     }
 
-    .app-main {
-        padding: 22px 16px 48px;
+    .main-nav {
+        overflow-x: auto;
+        max-width: 66vw;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
     }
+
+    .main-nav::-webkit-scrollbar {
+        display: none;
+    }
+
+    .nav-link {
+        padding: 8px 13px;
+        font-size: 12.5px;
+    }
+
+    /* ---- Main layout ---- */
+
+    .app-main {
+        padding: 20px 14px 48px;
+    }
+
+    .page-head {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .page-head h1 {
+        font-size: 20px;
+    }
+
+    /* ---- Forms ---- */
 
     .form-row {
         grid-template-columns: 1fr;
     }
 
+    .primary-btn,
+    .ghost-btn,
+    .action-btn,
+    select,
+    input[type="date"],
+    input[type="text"] {
+        min-height: 44px;
+    }
+
+    /* ---- Dashboard cards ---- */
+
     .summary-grid {
         grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
     }
 
     .summary-grid.cols-6 {
         grid-template-columns: repeat(2, 1fr);
     }
 
+    .stat-card {
+        padding: 14px;
+    }
+
+    .stat-card .stat-value {
+        font-size: 22px;
+    }
+
+    /* ---- Filter bars stack vertically ---- */
+
     .filter-bar {
-        align-items: flex-start;
+        align-items: stretch;
         flex-direction: column;
     }
+
+    .filter-row {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .filter-row select {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .custom-range-inputs {
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
+    }
+
+    .custom-range-inputs.show {
+        display: flex;
+    }
+
+    .custom-range-inputs input[type="date"] {
+        width: 100%;
+    }
+
+    .search-bar {
+        flex-direction: column;
+    }
+
+    .search-bar input {
+        min-width: 0;
+    }
+
+    /* ---- Doer performance rows ---- */
 
     .doer-row {
         grid-template-columns: 1fr;
@@ -1341,31 +1813,220 @@ td .cell-actions {
         font-weight: 600;
     }
 
+    /* ---- Tables become stacked cards ----
+       Each row becomes a bordered block; each cell stacks with its
+       column name shown via the data-label attribute (set in
+       app.js), and horizontal scrolling is no longer needed. */
+
+    .table-wrapper {
+        overflow-x: visible;
+        border: none;
+        border-radius: 0;
+    }
+
+    table, thead, tbody, th, td, tr {
+        display: block;
+        width: 100%;
+    }
+
+    thead {
+        display: none;
+    }
+
     table {
-        min-width: 620px;
+        min-width: 0;
+    }
+
+    tbody tr {
+        background: var(--white);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        margin-bottom: 12px;
+        padding: 6px 14px;
+        box-shadow: var(--shadow-sm);
+    }
+
+    tbody td {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+        text-align: right;
+        white-space: normal;
+        word-break: break-word;
+    }
+
+    tbody td:last-child {
+        border-bottom: none;
+    }
+
+    tbody td::before {
+        content: attr(data-label);
+        font-size: 11.5px;
+        font-weight: 700;
+        color: var(--ink-faint);
+        text-align: left;
+        flex-shrink: 0;
+        padding-top: 1px;
+    }
+
+    tbody td[data-label="Actions"] {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    tbody td[data-label="Actions"]::before {
+        margin-bottom: 6px;
+    }
+
+    td .cell-actions {
+        justify-content: flex-start;
+        width: 100%;
+    }
+
+    td .cell-actions .action-btn {
+        flex: 1;
+        min-width: 90px;
+        text-align: center;
+    }
+
+    /* ---- Modals ---- */
+
+    .modal-overlay {
+        padding: 12px;
+        align-items: flex-end;
+    }
+
+    .modal-box {
+        max-width: 100%;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+        max-height: 92vh;
+    }
+
+    .modal-box-lg {
+        max-width: 100%;
+        max-height: 92vh;
+        border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    }
+
+    .modal-actions {
+        flex-direction: column-reverse;
+    }
+
+    .modal-actions button {
+        width: 100%;
+    }
+
+    /* ---- Daily Pending / WhatsApp ---- */
+
+    .whatsapp-actions {
+        flex-direction: column;
+    }
+
+    .whatsapp-actions button {
+        width: 100%;
+        justify-content: center;
+    }
+
+    /* ---- Task cards (Follow Up) ---- */
+
+    .task-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .task-card-foot {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+
+    .task-actions {
+        width: 100%;
+    }
+
+    .task-actions .action-btn {
+        flex: 1;
+    }
+
+    /* ---- Toasts ---- */
+
+    .toast-stack {
+        left: 12px;
+        right: 12px;
+        top: 12px;
+    }
+
+    .toast {
+        max-width: none;
+    }
+
+    /* ---- WKNDOT ---- */
+
+    .wkndot-header-actions {
+        width: 100%;
+        flex-direction: column;
+    }
+
+    .wkndot-header-actions button {
+        width: 100%;
+        justify-content: center;
+    }
+
+    .wkndot-choice-row {
+        flex-direction: column;
+    }
+
+    .wkndot-choice-btn {
+        min-width: 0;
+        min-height: 46px;
+    }
+
+    .wkndot-review-actions {
+        flex-direction: column;
+        width: 100%;
+    }
+
+    .wkndot-review-actions .wkndot-choice-btn.small {
+        min-height: 40px;
+        width: 100%;
     }
 }
 
 @media (max-width: 480px) {
 
     .header-inner {
-        padding: 0 14px;
+        padding: 0 12px;
     }
 
     .brand-logo {
-        height: 30px;
+        height: 28px;
+    }
+
+    .brand-divider {
+        display: none;
     }
 
     .nav-link {
-        padding: 8px 12px;
-        font-size: 12.5px;
+        padding: 7px 11px;
+        font-size: 12px;
     }
 
-    .summary-grid {
+    .summary-grid,
+    .summary-grid.cols-6 {
         grid-template-columns: 1fr 1fr;
     }
 
     .page-head h1 {
-        font-size: 20px;
+        font-size: 19px;
+    }
+
+    .card-pad {
+        padding: 16px;
+    }
+
+    .whatsapp-preview {
+        font-size: 12.5px;
     }
 }
