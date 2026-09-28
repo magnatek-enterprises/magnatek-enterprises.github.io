@@ -1034,10 +1034,10 @@ app.get("/api/wkndot/summary", async (req, res) => {
                 COUNT(*) FILTER (
                     WHERE t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date
                 ) AS completed_on_time,
-                COUNT(*) FILTER (WHERE wr.review_status = 'Negative') AS negative,
-                COUNT(*) FILTER (WHERE wr.review_status = 'Non-Negative') AS non_negative,
+                COUNT(*) FILTER (WHERE wr.decision = 'Negative') AS negative,
+                COUNT(*) FILTER (WHERE wr.decision = 'Non-Negative') AS non_negative,
                 COUNT(*) FILTER (
-                    WHERE wr.review_status IS NULL
+                    WHERE wr.decision IS NULL
                       AND NOT (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date)
                 ) AS pending_review,
                 ROUND(AVG(
@@ -1137,10 +1137,10 @@ app.get("/api/wkndot/report", async (req, res) => {
                 COUNT(*) FILTER (
                     WHERE t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date
                 ) AS completed_on_time,
-                COUNT(*) FILTER (WHERE wr.review_status = 'Negative') AS negative,
-                COUNT(*) FILTER (WHERE wr.review_status = 'Non-Negative') AS non_negative,
+                COUNT(*) FILTER (WHERE wr.decision = 'Negative') AS negative,
+                COUNT(*) FILTER (WHERE wr.decision = 'Non-Negative') AS non_negative,
                 COUNT(*) FILTER (
-                    WHERE wr.review_status IS NULL
+                    WHERE wr.decision IS NULL
                       AND NOT (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date)
                 ) AS pending_review,
                 ROUND(AVG(
