@@ -815,7 +815,7 @@ const WKNDOT_TASK_ROW_SQL = `
         t.priority,
         t.total_revisions,
         t.updated_at,
-        wr.review_status,
+        wr.decision AS review_status,
         wr.review_date,
         wr.decided_mid_week,
         (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date) AS completed_on_time,
