@@ -1072,10 +1072,6 @@ async function submitRevise() {
         loadTasks();
         loadTodayTasks();
 
-        // Keep Daily Pending in sync too, if that's where the revise
-        // was triggered from (or it's simply already open elsewhere).
-        if (dailyPendingState.doerId) refreshDailyPending();
-
         // If the WKNDOT view has already loaded data for the
         // relevant week, refresh it so the new decision shows up
         // immediately instead of looking stale.
@@ -1651,11 +1647,8 @@ async function onDailyPendingDoerChange() {
 
     document.getElementById("dailyPendingDoerName").textContent = dailyPendingState.doerName;
     document.getElementById("dailyPendingTable").innerHTML =
-        `<tr><td colspan="7"><div class="state-block"><div class="state-title">Loading…</div></div></td></tr>`;
+        `<tr><td colspan="6"><div class="state-block"><div class="state-title">Loading…</div></div></td></tr>`;
     document.getElementById("whatsappPreview").value = "";
-
-    const searchInput = document.getElementById("dailyPendingSearch");
-    if (searchInput) searchInput.value = "";
 
     try {
 
@@ -1676,7 +1669,7 @@ async function onDailyPendingDoerChange() {
 
         console.error("DAILY PENDING ERROR:", error);
         document.getElementById("dailyPendingTable").innerHTML =
-            `<tr><td colspan="7">${errorState("Couldn't load pending tasks", "Check your connection and try again.")}</td></tr>`;
+            `<tr><td colspan="6">${errorState("Couldn't load pending tasks", "Check your connection and try again.")}</td></tr>`;
 
     }
 }
@@ -1686,7 +1679,7 @@ function renderDailyPendingTable(tasks) {
     const table = document.getElementById("dailyPendingTable");
 
     if (!tasks || tasks.length === 0) {
-        table.innerHTML = `<tr><td colspan="7">${emptyState(
+        table.innerHTML = `<tr><td colspan="6">${emptyState(
             "No pending tasks",
             "This doer has no pending tasks right now."
         )}</td></tr>`;
@@ -1701,90 +1694,8 @@ function renderDailyPendingTable(tasks) {
             <td data-label="Planned Date">${formatDate(task.planned_date)}</td>
             <td data-label="Priority">${priorityBadge(task.priority)}</td>
             <td data-label="Status">${statusBadge(task)}</td>
-            <td data-label="Actions">
-                <div class="cell-actions">
-                    <button class="action-btn done-btn" onclick="markDoneFromDailyPending(${task.id})">Done</button>
-                    <button class="action-btn revise-btn" onclick="reviseTask(${task.id})">Revise</button>
-                </div>
-            </td>
         </tr>
     `).join("");
-}
-
-// Search box on Daily Pending only ever narrows by task text, on top
-// of whatever the server already returned for the selected doer
-// (Pending only). There is deliberately no second "search by doer"
-// box here - the Doer dropdown above is already the doer filter.
-function filterDailyPending() {
-
-    const searchInput = document.getElementById("dailyPendingSearch");
-    const taskText = (searchInput ? searchInput.value : "").toLowerCase();
-
-    const filtered = dailyPendingState.tasks.filter(task =>
-        (task.task || "").toLowerCase().includes(taskText)
-    );
-
-    renderDailyPendingTable(filtered);
-}
-
-// Mark-done action available directly from Daily Pending, refreshing
-// the Daily Pending list itself (not just Tasks/Follow Up) so the
-// completed task disappears from view immediately.
-async function markDoneFromDailyPending(id) {
-
-    if (!confirm("Mark this task as completed?")) return;
-
-    try {
-
-        const response = await fetch(`${API}/api/tasks/${id}/done`, { method: "PUT" });
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(data.error || "Failed to complete task");
-        }
-
-        showToast("Task marked as completed.", "success");
-
-        if (dailyPendingState.doerId) refreshDailyPending();
-        loadTasks();
-        loadTodayTasks();
-
-    } catch (error) {
-
-        console.error("MARK DONE ERROR:", error);
-        showToast(error.message, "error");
-
-    }
-}
-
-// Re-fetches the currently selected Daily Pending doer's pending
-// tasks without resetting the doer dropdown - used after a Revise or
-// Done action so the list, count and WhatsApp message all stay in
-// sync with the database.
-async function refreshDailyPending() {
-
-    if (!dailyPendingState.doerId) return;
-
-    try {
-
-        const params = new URLSearchParams({ status: "Pending", doer_id: dailyPendingState.doerId });
-        const response = await fetch(`${API}/api/tasks?${params.toString()}`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-        const tasks = await response.json();
-        dailyPendingState.tasks = tasks;
-
-        filterDailyPending();
-        document.getElementById("whatsappPreview").value = buildWhatsAppMessage(tasks);
-
-        const count = document.getElementById("dailyPendingCount");
-        if (count) count.textContent = tasks.length ? `${tasks.length} pending task${tasks.length === 1 ? "" : "s"}` : "";
-
-    } catch (error) {
-
-        console.error("DAILY PENDING REFRESH ERROR:", error);
-
-    }
 }
 
 // Builds a clean, practical WhatsApp message from the doer's
@@ -2124,11 +2035,11 @@ function wkndotTaskStatusBlock(task) {
     }
 
     if (task.review_status === "Negative") {
-        return `<span class="wkndot-decided-chip negative">Negative</span>`;
+        return `<span class="wkndot-decided-chip negative">Negative${task.decided_mid_week ? " (mid-week)" : ""}</span>`;
     }
 
     if (task.review_status === "Non-Negative") {
-        return `<span class="wkndot-decided-chip non-negative">Non-Negative</span>`;
+        return `<span class="wkndot-decided-chip non-negative">Non-Negative${task.decided_mid_week ? " (mid-week)" : ""}</span>`;
     }
 
     return `
@@ -2227,58 +2138,52 @@ function printWkndotReport() {
 // A lightweight CSV export (opens fine in Excel) so a workable
 // export exists without pulling in a spreadsheet library - Print /
 // PDF stays the primary, fully-styled report per the brief.
-//
-// This is ALWAYS the company-wide, all-doers report for the
-// selected week, regardless of which doer (if any) is currently
-// selected on screen for preview - so it's fetched fresh here rather
-// than reused from wkndotState.summary, which is scoped to whichever
-// doer is selected for the on-screen preview.
-async function exportWkndotCSV() {
-
-    if (!wkndotState.weekStart || !wkndotState.weekEnd) {
-        showToast("Select a week first.", "error");
-        return;
-    }
+function exportWkndotCSV() {
 
     const weekLabel = formatWkndotWeekLabel(wkndotState.weekStart, wkndotState.weekEnd);
+    let rows = [];
 
-    let allDoerSummary;
+    if (wkndotState.doerId) {
 
-    try {
+        rows.push(["Task ID", "Doer", "Task", "Original Due", "Current Planned", "Status", "Delay (days)", "WKNDOT"]);
 
-        const params = new URLSearchParams({
-            week_start: wkndotState.weekStart,
-            week_end: wkndotState.weekEnd
+        wkndotState.tasks.forEach(task => {
+            const wkndotVal = task.completed_on_time
+                ? "Completed On Time"
+                : (task.review_status || "Pending Review");
+            const delay = task.status === "Completed" ? (task.delay_days || 0) : (task.currently_delayed_days || 0);
+
+            rows.push([
+                task.task_code || task.id,
+                task.doer_name || "",
+                task.task || "",
+                task.original_planned_date ? task.original_planned_date.split("T")[0] : "",
+                task.planned_date ? task.planned_date.split("T")[0] : "",
+                task.status || "",
+                delay,
+                wkndotVal
+            ]);
         });
 
-        const response = await fetch(`${API}/api/wkndot/summary?${params.toString()}`);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } else {
 
-        allDoerSummary = await response.json();
+        rows.push(["#", "Doer", "Tasks Due", "Completed", "Negative", "Non-Negative", "Pending", "WKNDOT %", "Avg Delay"]);
 
-    } catch (error) {
-
-        console.error("WKNDOT EXPORT ERROR:", error);
-        showToast("Couldn't build the Excel export. Check your connection and try again.", "error");
-        return;
+        wkndotState.summary.forEach((r, i) => {
+            rows.push([
+                i + 1,
+                r.doer_name,
+                r.total_due,
+                r.completed_on_time,
+                r.negative,
+                r.non_negative,
+                r.pending_review,
+                r.wkndot_percentage + "%",
+                r.avg_delay !== null ? r.avg_delay : ""
+            ]);
+        });
 
     }
-
-    const rows = [["#", "Doer", "Tasks Due", "Completed", "Negative", "Non-Negative", "Pending", "WKNDOT %", "Avg Delay"]];
-
-    allDoerSummary.forEach((r, i) => {
-        rows.push([
-            i + 1,
-            r.doer_name,
-            r.total_due,
-            r.completed_on_time,
-            r.negative,
-            r.non_negative,
-            r.pending_review,
-            r.wkndot_percentage + "%",
-            r.avg_delay !== null ? r.avg_delay : ""
-        ]);
-    });
 
     const csv = rows.map(row =>
         row.map(cell => {
@@ -2292,7 +2197,7 @@ async function exportWkndotCSV() {
     const link = document.createElement("a");
 
     link.href = url;
-    link.download = `WKNDOT ${weekLabel.replace(/\s/g, "")} All-Doers.csv`;
+    link.download = `WKNDOT ${weekLabel.replace(/\s/g, "")} ${wkndotState.doerName.replace(/\s/g, "-")}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
