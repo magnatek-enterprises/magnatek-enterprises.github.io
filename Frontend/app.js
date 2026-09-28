@@ -916,7 +916,6 @@ async function reviseTask(id) {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const task = await response.json();
-
         // Same rule as the server: the WKNDOT week is the week of the
         // date the task is being moved FROM (its current planned_date).
         const movedFromDate = task.planned_date;
@@ -1888,21 +1887,30 @@ function buildWkndotWeekOptions() {
     const today = istTodayAsUTCDate();
     const currentWeek = wkndotWeekOf(today);
     const weekdayUTC = today.getUTCDay(); // 0 = Sun ... 6 = Sat
+    const isoWeekday = weekdayUTC === 0 ? 7 : weekdayUTC; // 1 = Mon ... 7 = Sun
 
-    const currentWeekIsComplete = weekdayUTC === 6 || weekdayUTC === 0;
+    // From Wednesday onward the CURRENT week's WKNDOT is visible (and
+    // selected by default) so it can be watched before Saturday.
+    // On Monday/Tuesday the list starts at last week instead.
+    const currentWeekVisible = isoWeekday >= 3;
 
-    const mostRecentMonday = currentWeekIsComplete
+    const firstMonday = currentWeekVisible
         ? mondayOfWeek(today)
         : addDaysUTC(mondayOfWeek(today), -7);
 
     const weeks = [];
 
     for (let i = 0; i < 12; i++) {
-        const mon = addDaysUTC(mostRecentMonday, -7 * i);
+        const mon = addDaysUTC(firstMonday, -7 * i);
         const sat = addDaysUTC(mon, 5);
         const start = toISODateStr(mon);
         const end = toISODateStr(sat);
-        weeks.push({ start, end, label: formatWkndotWeekLabel(start, end) });
+        const isCurrent = start === currentWeek.start;
+        weeks.push({
+            start,
+            end,
+            label: formatWkndotWeekLabel(start, end) + (isCurrent ? " · Current week" : "")
+        });
     }
 
     wkndotWeeks = weeks;
@@ -2019,6 +2027,12 @@ async function loadWkndotData() {
     }
 }
 
+// Shown under the numbers so the formula is never a mystery.
+function wkndotFormulaHint(weights) {
+    const w = weights || { negative: 100, non_negative: 25 };
+    return `<p class="card-hint wkndot-print-summary">WKNDOT % = (Negative × ${w.negative}% + Non-Negative × ${w.non_negative}%) ÷ Total tasks × 100. Completed and Pending tasks have 0% impact - pending work is not counted against anyone until it is revised.</p>`;
+}
+
 function wkndotStatCard(label, value, cls) {
     return `
         <div class="stat-card ${cls || ""}">
@@ -2045,14 +2059,20 @@ function renderWkndotAllDoers() {
     const totalOnTime = rows.reduce((sum, r) => sum + r.completed_on_time, 0);
     const totalNegative = rows.reduce((sum, r) => sum + r.negative, 0);
     const totalPending = rows.reduce((sum, r) => sum + r.pending_review, 0);
+    const totalNonNegative = rows.reduce((sum, r) => sum + r.non_negative, 0);
+    const totalImpact = rows.reduce((sum, r) => sum + (r.weighted_impact || 0), 0);
+    const companyPct = totalDue > 0 ? Math.round((totalImpact / totalDue) * 10000) / 100 : 0;
 
     summaryWrap.innerHTML = `
         <div class="summary-grid cols-6 section-gap wkndot-print-summary">
             ${wkndotStatCard("Total Tasks Due", totalDue, "total")}
-            ${wkndotStatCard("Completed On Time", totalOnTime, "completed")}
+            ${wkndotStatCard("Completed", totalOnTime, "completed")}
             ${wkndotStatCard("Negative", totalNegative, "overdue")}
-            ${wkndotStatCard("Pending Review", totalPending, "week-shifted")}
+            ${wkndotStatCard("Non-Negative", totalNonNegative, "week-shifted")}
+            ${wkndotStatCard("Pending", totalPending, "pending")}
+            ${wkndotStatCard("WKNDOT %", companyPct + "%", "completed")}
         </div>
+        ${wkndotFormulaHint(rows[0] && rows[0].weights)}
 
         <div class="table-wrapper wkndot-print-table">
             <table>
@@ -2105,13 +2125,14 @@ function renderWkndotSingleDoer() {
     summaryWrap.innerHTML = `
         <div class="summary-grid cols-6 section-gap wkndot-print-summary">
             ${wkndotStatCard("Total Tasks Due", row.total_due, "total")}
-            ${wkndotStatCard("Completed On Time", row.completed_on_time, "completed")}
+            ${wkndotStatCard("Completed", row.completed, "completed")}
             ${wkndotStatCard("Negative", row.negative, "overdue")}
             ${wkndotStatCard("Non-Negative", row.non_negative, "week-shifted")}
-            ${wkndotStatCard("Pending Review", row.pending_review, "pending")}
+            ${wkndotStatCard("Pending", row.pending_review, "pending")}
             ${wkndotStatCard("WKNDOT %", row.wkndot_percentage + "%", "completed")}
         </div>
-        <p class="card-hint wkndot-print-summary">Negative Rate: <strong>${row.negative_rate}%</strong> · Avg Delay: <strong>${row.avg_delay !== null ? row.avg_delay + " days" : "—"}</strong> · Max Delay: <strong>${row.max_delay !== null ? row.max_delay + " days" : "—"}</strong></p>
+        ${wkndotFormulaHint(row.weights)}
+        <p class="card-hint wkndot-print-summary">Weighted impact: <strong>${row.weighted_impact}</strong> of ${row.total_due} tasks · Negative Rate: <strong>${row.negative_rate}%</strong> · Avg Delay: <strong>${row.avg_delay !== null ? row.avg_delay + " days" : "—"}</strong> · Max Delay: <strong>${row.max_delay !== null ? row.max_delay + " days" : "—"}</strong></p>
     `;
 
     renderWkndotTaskList(wkndotState.tasks);
