@@ -49,6 +49,11 @@ async function ensureSchema() {
         `);
 
         await pool.query(`
+            ALTER TABLE task_revisions
+            ADD COLUMN IF NOT EXISTS previous_planned_date DATE
+        `);
+
+        await pool.query(`
             ALTER TABLE tasks
             ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         `);
@@ -157,6 +162,12 @@ function normalizeWkndotDecision(value) {
 //
 // DELAY (days):
 //   updated_at::date - WKNDOT date, only meaningful when positive.
+//
+// LATE REVISION:
+//   If a task was due in the selected Mon-Sat week but was revised
+//   after that Saturday (for example on Monday), task_revisions.previous_planned_date
+//   keeps the date it was moved FROM. Such a revision is included in that
+//   previous WKNDOT week, while the task's normal status remains unchanged.
 // ---------------------------------------------------------
 
 const WKNDOT_GRACE_DAYS = 2;
@@ -612,7 +623,7 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
 
         const currentTask = taskResult.rows[0];
 
-        const originalDate = currentTask.original_planned_date || currentTask.planned_date;
+        const originalDate = currentTask.planned_date || currentTask.original_planned_date;
 
 
         const weekResult = await client.query(`
@@ -718,14 +729,16 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
                 task_id,
                 revision_number,
                 revision_date,
+                previous_planned_date,
                 planned_date,
                 revision_text
             )
             VALUES
-            ($1, $2, CURRENT_DATE, $3, $4)
+            ($1, $2, CURRENT_DATE, $3, $4, $5)
         `, [
             id,
             newRevisionNumber,
+            currentTask.planned_date,
             planned_date,
             revision_text || null
         ]);
@@ -799,6 +812,7 @@ app.get("/api/tasks/:id/revisions", async (req, res) => {
             SELECT
                 revision_number,
                 revision_date,
+                previous_planned_date,
                 planned_date,
                 revision_text
             FROM task_revisions
@@ -890,7 +904,16 @@ async function fetchWkndotTasks(weekStart, weekEnd, doerId) {
         JOIN users u ON t.user_id = u.id
         LEFT JOIN wkndot_reviews wr
             ON wr.task_id = t.id AND wr.week_start = $1::date
-        WHERE ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+        WHERE (
+            ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+            OR EXISTS (
+                SELECT 1
+                FROM task_revisions tr
+                WHERE tr.task_id = t.id
+                  AND tr.previous_planned_date BETWEEN $1::date AND $2::date
+                  AND tr.revision_date BETWEEN $2::date AND ($2::date + 7)
+            )
+        )
         ${doerClause}
         ORDER BY u.name, ${WKNDOT_DATE_SQL}, t.id
     `, params);
@@ -947,7 +970,16 @@ async function fetchWkndotSummary(weekStart, weekEnd, doerId) {
         FROM users u
         JOIN tasks t
             ON t.user_id = u.id
-           AND ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+           AND (
+                ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+                OR EXISTS (
+                    SELECT 1
+                    FROM task_revisions tr
+                    WHERE tr.task_id = t.id
+                      AND tr.previous_planned_date BETWEEN $1::date AND $2::date
+                      AND tr.revision_date BETWEEN $2::date AND ($2::date + 7)
+                )
+           )
         LEFT JOIN wkndot_reviews wr
             ON wr.task_id = t.id AND wr.week_start = $1::date
         WHERE u.role = 'Doer'
