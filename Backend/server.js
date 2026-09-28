@@ -1,7 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
-require("dotenv").config();
+require("dotenv").config({ path: __dirname + "/.env" });
 
 const app = express();
 
@@ -14,11 +14,7 @@ app.use(express.json());
 // ===============================
 
 const pool = new Pool({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT
+    connectionString: process.env.DATABASE_URL
 });
 
 
@@ -134,6 +130,78 @@ function normalizeWkndotDecision(value) {
     if (value === "Negative" || value === "MARK_NEGATIVE") return "Negative";
     if (value === "Non-Negative" || value === "DO_NOT_MARK_NEGATIVE") return "Non-Negative";
     return null;
+}
+
+// ---------------------------------------------------------
+// WKNDOT DEFINITIONS - SINGLE SOURCE OF TRUTH
+//
+// Every WKNDOT query below (tasks list, summary, report) is built
+// from these four fragments, so no endpoint can drift into its own
+// private definition. All of them assume the query aliases the
+// tasks table as "t" and passes the review week as
+//   $1 = week_start (Monday), $2 = week_end (Saturday).
+//
+// WKNDOT DATE (which week a task belongs to):
+//   COALESCE(original_planned_date, planned_date)
+//   - never-revised tasks have original_planned_date = NULL, so
+//     planned_date is used
+//   - revised tasks keep their ORIGINAL date, so they stay in the
+//     week they were originally committed to, however far
+//     planned_date has since been pushed out
+//
+// COMPLETED FOR THIS WEEK (with grace period):
+//   status = 'Completed' AND updated_at::date <= week_end + 2 days
+//   i.e. anytime in the week, or on either of the first two days
+//   after it. Completion date is the stored updated_at (set by
+//   PUT /api/tasks/:id/done) - never today's date.
+//
+// DELAY (days):
+//   updated_at::date - WKNDOT date, only meaningful when positive.
+// ---------------------------------------------------------
+
+const WKNDOT_GRACE_DAYS = 2;
+
+const WKNDOT_DATE_SQL = `COALESCE(t.original_planned_date, t.planned_date)`;
+
+const WKNDOT_COMPLETED_SQL =
+    `(t.status = 'Completed' AND t.updated_at::date <= ($2::date + ${WKNDOT_GRACE_DAYS}))`;
+
+const WKNDOT_DELAY_SQL = `(t.updated_at::date - ${WKNDOT_DATE_SQL})`;
+
+const WKNDOT_COMPLETED_LATE_SQL =
+    `(${WKNDOT_COMPLETED_SQL} AND ${WKNDOT_DELAY_SQL} > 0)`;
+
+// ---------------------------------------------------------
+// WKNDOT SCORING
+//
+// Green Score = completed / total tasks for the week.
+//
+// Red Score:
+//   actualRedScore   = negative / totalDue * 100
+//   revisionRedScore = revisedTasks / totalDue * 100
+//   finalRedScore    = MAX(actualRedScore, revisionRedScore)
+//
+// The revision component is purely task-count based: the number
+// of tasks in the week that have been revised at least once
+// (tasks.total_revisions > 0, one row per task - a task revised 3
+// times still counts once) divided by the total tasks in that same
+// week. There is no fixed threshold, so 3 revised tasks weigh
+// differently out of 10 tasks than out of 20.
+//
+// >>> NEEDS CONFIRMATION: the "MAX(actual, revision)" combination
+// >>> on the finalRedScore line below is carried over unchanged
+// >>> from the previous server.js. If the intended rule is to ADD
+// >>> the two, or to weight them, this is the one line to change.
+// ---------------------------------------------------------
+
+function computeWkndotScores({ totalDue, completed, negative, revised }) {
+
+    const greenScore = totalDue > 0 ? Math.round((completed / totalDue) * 100) : 0;
+    const actualRedScore = totalDue > 0 ? Math.round((negative / totalDue) * 100) : 0;
+    const revisionRedScore = totalDue > 0 ? Math.round((revised / totalDue) * 100) : 0;
+    const finalRedScore = Math.max(actualRedScore, revisionRedScore);
+
+    return { greenScore, actualRedScore, revisionRedScore, finalRedScore };
 }
 
 
@@ -363,6 +431,13 @@ app.post("/api/tasks", async (req, res) => {
 
 // ===============================
 // MARK TASK AS DONE
+//
+// Only marks the task Completed and stamps updated_at. It does NOT
+// write a WKNDOT review: whether a completed task is Negative or
+// Non-Negative is a human decision (wkndot_reviews via
+// POST /api/wkndot/review), and until someone decides, WKNDOT
+// reports it as "Pending Review". WKNDOT recognises the completion
+// on its own from status + updated_at.
 // ===============================
 
 app.put("/api/tasks/:id/done", async (req, res) => {
@@ -370,7 +445,6 @@ app.put("/api/tasks/:id/done", async (req, res) => {
     try {
 
         const { id } = req.params;
-
 
         const result = await pool.query(`
             UPDATE tasks
@@ -381,7 +455,6 @@ app.put("/api/tasks/:id/done", async (req, res) => {
             RETURNING *
         `, [id]);
 
-
         if (result.rows.length === 0) {
 
             return res.status(404).json({
@@ -389,7 +462,6 @@ app.put("/api/tasks/:id/done", async (req, res) => {
             });
 
         }
-
 
         res.json({
             success: true,
@@ -399,16 +471,22 @@ app.put("/api/tasks/:id/done", async (req, res) => {
 
     } catch (error) {
 
-        console.error(error);
+        console.error(
+            "MARK TASK DONE ERROR:",
+            error
+        );
 
         res.status(500).json({
-            error: "Failed to complete task"
+
+            error: "Failed to complete task",
+
+            detail: error.message
+
         });
 
     }
 
 });
-
 
 // ===============================
 // GET SINGLE TASK (detail)
@@ -558,14 +636,7 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
             // Keyed on (task_id, week_start) only - week_end is fully
             // determined by week_start for a Mon-Sat week (it's
             // always week_start + 5 days), so it is never part of
-            // the identity of a WKNDOT decision. Matching on all
-            // three columns here was the actual bug: it let this
-            // lookup silently miss an existing row whenever it was
-            // written with a week_end that didn't exactly match this
-            // call's, and the INSERT below would then collide with
-            // the real unique constraint on (task_id, week_start),
-            // which its ON CONFLICT target didn't cover - producing
-            // the "duplicate key value violates..." error.
+            // the identity of a WKNDOT decision.
             const existing = await client.query(`
                 SELECT decision
                 FROM wkndot_reviews
@@ -612,14 +683,10 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
 
                 } catch (wkndotInsertError) {
 
-                    // Safety net: if the live unique constraint turns
-                    // out to be shaped differently than expected, a
-                    // genuine 23505 (unique_violation) can still
-                    // surface here despite the ON CONFLICT above.
-                    // Rather than failing the whole revision over a
-                    // WKNDOT bookkeeping race, treat it exactly like
-                    // "someone already decided this" and reuse
-                    // whatever is now stored.
+                    // Safety net: a genuine 23505 (unique_violation)
+                    // is treated as "someone already decided this" and
+                    // the stored decision is reused, instead of failing
+                    // the whole revision over WKNDOT bookkeeping.
                     if (wkndotInsertError.code === "23505") {
 
                         const retry = await client.query(`
@@ -756,6 +823,10 @@ app.get("/api/tasks/:id/revisions", async (req, res) => {
 
 // ===============================
 // WKNDOT
+//
+// All queries here use the shared definitions (WKNDOT_DATE_SQL,
+// WKNDOT_COMPLETED_SQL, ...) declared above with
+//   $1 = week_start, $2 = week_end (and $3 = doer id when given).
 // ===============================
 
 function requireWeekParams(req, res) {
@@ -767,36 +838,159 @@ function requireWeekParams(req, res) {
     return { week_start, week_end };
 }
 
-const WKNDOT_TASK_ROW_SQL = `
-    SELECT
-        t.id,
-        t.task_code,
-        t.task,
-        t.user_id AS doer_id,
-        u.name AS doer_name,
-        t.original_planned_date,
-        t.planned_date,
-        t.status,
-        t.priority,
-        t.total_revisions,
-        t.updated_at,
-        wr.decision AS review_status,
-        (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date) AS completed_on_time,
-        (t.status = 'Completed' AND t.updated_at::date > t.original_planned_date) AS completed_late,
-        CASE
-            WHEN t.status = 'Completed' AND t.updated_at::date > t.original_planned_date
-                THEN GREATEST((t.updated_at::date - t.original_planned_date)::int, 0)
-        END AS delay_days,
-        CASE
-            WHEN t.status != 'Completed'
-                THEN GREATEST((CURRENT_DATE - t.original_planned_date)::int, 0)
-        END AS currently_delayed_days
-    FROM tasks t
-    JOIN users u ON t.user_id = u.id
-    LEFT JOIN wkndot_reviews wr
-        ON wr.task_id = t.id AND wr.week_start = $1
-    WHERE t.original_planned_date BETWEEN $1 AND $2
-`;
+// One row per task belonging to the week. Per-task fields:
+//   original_planned_date : the WKNDOT date (COALESCE'd), so it is
+//                           never null for never-revised tasks
+//   planned_date          : current (possibly revised) planned date
+//   completed_on_time     : counts as COMPLETED for this week
+//                           (completed within week + 2-day grace);
+//                           name kept for API compatibility
+//   completed_in_window   : same value, clearer name
+//   pending_review        : completed for this week, no decision yet
+//   delay_days            : final delay once Completed (if late)
+//   currently_delayed_days: live delay while not yet Completed
+async function fetchWkndotTasks(weekStart, weekEnd, doerId) {
+
+    const params = [weekStart, weekEnd];
+    let doerClause = "";
+
+    if (doerId) {
+        params.push(doerId);
+        doerClause = ` AND t.user_id = $${params.length}`;
+    }
+
+    const result = await pool.query(`
+        SELECT
+            t.id,
+            t.task_code,
+            t.task,
+            t.user_id AS doer_id,
+            u.name AS doer_name,
+            ${WKNDOT_DATE_SQL} AS original_planned_date,
+            ${WKNDOT_DATE_SQL} AS wkndot_date,
+            t.planned_date,
+            t.status,
+            t.priority,
+            t.total_revisions,
+            t.updated_at,
+            wr.decision AS review_status,
+            ${WKNDOT_COMPLETED_SQL} AS completed_on_time,
+            ${WKNDOT_COMPLETED_SQL} AS completed_in_window,
+            ${WKNDOT_COMPLETED_LATE_SQL} AS completed_late,
+            (${WKNDOT_COMPLETED_SQL} AND wr.decision IS NULL) AS pending_review,
+            CASE
+                WHEN t.status = 'Completed' AND ${WKNDOT_DELAY_SQL} > 0
+                    THEN ${WKNDOT_DELAY_SQL}
+            END AS delay_days,
+            CASE
+                WHEN t.status != 'Completed'
+                    THEN GREATEST((CURRENT_DATE - ${WKNDOT_DATE_SQL})::int, 0)
+            END AS currently_delayed_days
+        FROM tasks t
+        JOIN users u ON t.user_id = u.id
+        LEFT JOIN wkndot_reviews wr
+            ON wr.task_id = t.id AND wr.week_start = $1::date
+        WHERE ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+        ${doerClause}
+        ORDER BY u.name, ${WKNDOT_DATE_SQL}, t.id
+    `, params);
+
+    return result.rows;
+}
+
+// One row per doer with at least one task in the week.
+//   total_due          : tasks belonging to the week
+//   completed_on_time  : completed within week + grace (also
+//                        returned as "completed")
+//   negative / non_negative : review decisions on VALID COMPLETED
+//                        tasks only, so that always
+//                        completed = negative + non_negative + pending_review
+//   pending_review     : valid completed tasks with no review yet
+//                        (never open/unfinished tasks)
+//   open_tasks         : not completed for this week
+//   revised_tasks      : tasks with total_revisions > 0
+//   avg_delay/max_delay: over tasks completed within the window
+//                        that finished after their WKNDOT date
+async function fetchWkndotSummary(weekStart, weekEnd, doerId) {
+
+    const params = [weekStart, weekEnd];
+    let doerClause = "";
+
+    if (doerId) {
+        params.push(doerId);
+        doerClause = ` AND u.id = $${params.length}`;
+    }
+
+    const result = await pool.query(`
+        SELECT
+            u.id AS doer_id,
+            u.name AS doer_name,
+            COUNT(t.id) AS total_due,
+            COUNT(*) FILTER (WHERE ${WKNDOT_COMPLETED_SQL}) AS completed,
+            COUNT(*) FILTER (
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision = 'Negative'
+            ) AS negative,
+            COUNT(*) FILTER (
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision = 'Non-Negative'
+            ) AS non_negative,
+            COUNT(*) FILTER (
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision IS NULL
+            ) AS pending_review,
+            COUNT(*) FILTER (WHERE NOT ${WKNDOT_COMPLETED_SQL}) AS open_tasks,
+            COUNT(*) FILTER (WHERE t.total_revisions > 0) AS revised,
+            ROUND(AVG(
+                CASE WHEN ${WKNDOT_COMPLETED_LATE_SQL} THEN ${WKNDOT_DELAY_SQL} END
+            ), 1) AS avg_delay,
+            MAX(
+                CASE WHEN ${WKNDOT_COMPLETED_LATE_SQL} THEN ${WKNDOT_DELAY_SQL} END
+            ) AS max_delay
+        FROM users u
+        JOIN tasks t
+            ON t.user_id = u.id
+           AND ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
+        LEFT JOIN wkndot_reviews wr
+            ON wr.task_id = t.id AND wr.week_start = $1::date
+        WHERE u.role = 'Doer'
+        ${doerClause}
+        GROUP BY u.id, u.name
+        HAVING COUNT(t.id) > 0
+        ORDER BY u.name
+    `, params);
+
+    return result.rows.map(row => {
+
+        const totalDue = Number(row.total_due);
+        const completed = Number(row.completed);
+        const negative = Number(row.negative);
+        const revised = Number(row.revised);
+
+        const { greenScore, actualRedScore, revisionRedScore, finalRedScore } =
+            computeWkndotScores({ totalDue, completed, negative, revised });
+
+        return {
+            doer_id: row.doer_id,
+            doer_name: row.doer_name,
+            total_due: totalDue,
+            completed,
+            completed_on_time: completed,
+            negative,
+            non_negative: Number(row.non_negative),
+            pending_review: Number(row.pending_review),
+            open_tasks: Number(row.open_tasks),
+            revised_tasks: revised,
+            wkndot_percentage: greenScore,
+            negative_rate: actualRedScore,
+            green_score: greenScore,
+            actual_red_score: actualRedScore,
+            revision_red_score: revisionRedScore,
+            final_red_score: finalRedScore,
+            avg_delay: row.avg_delay !== null ? Number(row.avg_delay) : null,
+            max_delay: row.max_delay !== null ? Number(row.max_delay) : null
+        };
+
+    });
+
+}
 
 app.get("/api/wkndot/tasks", async (req, res) => {
 
@@ -805,24 +999,13 @@ app.get("/api/wkndot/tasks", async (req, res) => {
         const weekParams = requireWeekParams(req, res);
         if (!weekParams) return;
 
-        const { week_start, week_end } = weekParams;
-        const { doer_id } = req.query;
+        const rows = await fetchWkndotTasks(
+            weekParams.week_start,
+            weekParams.week_end,
+            req.query.doer_id
+        );
 
-        const params = [week_start, week_end];
-        let doerClause = "";
-
-        if (doer_id) {
-            params.push(doer_id);
-            doerClause = ` AND t.user_id = $${params.length}`;
-        }
-
-        const result = await pool.query(`
-            ${WKNDOT_TASK_ROW_SQL}
-            ${doerClause}
-            ORDER BY u.name, t.original_planned_date
-        `, params);
-
-        res.json(result.rows);
+        res.json(rows);
 
     } catch (error) {
 
@@ -888,12 +1071,25 @@ app.post("/api/wkndot/review", async (req, res) => {
             });
         }
 
+        // The task must belong to the given week by the same WKNDOT
+        // date definition used everywhere else, so a decision can
+        // never be filed under the wrong week.
         const taskResult = await pool.query(`
-            SELECT id FROM tasks WHERE id = $1
-        `, [task_id]);
+            SELECT
+                t.id,
+                (${WKNDOT_DATE_SQL} BETWEEN $2::date AND $3::date) AS in_week
+            FROM tasks t
+            WHERE t.id = $1
+        `, [task_id, week_start, week_end]);
 
         if (taskResult.rows.length === 0) {
             return res.status(404).json({ error: "Task not found" });
+        }
+
+        if (!taskResult.rows[0].in_week) {
+            return res.status(400).json({
+                error: "This task does not belong to the given WKNDOT week (based on its original planned date)"
+            });
         }
 
         let review;
@@ -917,9 +1113,9 @@ app.post("/api/wkndot/review", async (req, res) => {
 
         } catch (wkndotInsertError) {
 
-            // See the matching comment in PUT /api/tasks/:id/revise -
-            // this is the same (task_id, week_start) upsert, with the
-            // same defensive fallback for a genuine 23505 race.
+            // Same (task_id, week_start) upsert as in the revise
+            // route, with the same defensive fallback for a genuine
+            // 23505 race.
             if (wkndotInsertError.code === "23505") {
 
                 const retry = await pool.query(`
@@ -964,75 +1160,11 @@ app.get("/api/wkndot/summary", async (req, res) => {
         const weekParams = requireWeekParams(req, res);
         if (!weekParams) return;
 
-        const { week_start, week_end } = weekParams;
-        const { doer_id } = req.query;
-
-        const params = [week_start, week_end];
-        let doerClause = "";
-
-        if (doer_id) {
-            params.push(doer_id);
-            doerClause = ` AND u.id = $${params.length}`;
-        }
-
-        const result = await pool.query(`
-            SELECT
-                u.id AS doer_id,
-                u.name AS doer_name,
-                COUNT(t.id) AS total_due,
-                COUNT(*) FILTER (
-                    WHERE t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date
-                ) AS completed_on_time,
-                COUNT(*) FILTER (WHERE wr.decision = 'Negative') AS negative,
-                COUNT(*) FILTER (WHERE wr.decision = 'Non-Negative') AS non_negative,
-                COUNT(*) FILTER (
-                    WHERE wr.decision IS NULL
-                      AND NOT (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date)
-                ) AS pending_review,
-                ROUND(AVG(
-                    CASE
-                        WHEN t.status = 'Completed' AND t.updated_at::date > t.original_planned_date
-                            THEN (t.updated_at::date - t.original_planned_date)
-                    END
-                ), 1) AS avg_delay,
-                MAX(
-                    CASE
-                        WHEN t.status = 'Completed' AND t.updated_at::date > t.original_planned_date
-                            THEN (t.updated_at::date - t.original_planned_date)
-                    END
-                ) AS max_delay
-            FROM users u
-            JOIN tasks t
-                ON t.user_id = u.id
-               AND t.original_planned_date BETWEEN $1 AND $2
-            LEFT JOIN wkndot_reviews wr
-                ON wr.task_id = t.id AND wr.week_start = $1
-            WHERE u.role = 'Doer'
-            ${doerClause}
-            GROUP BY u.id, u.name
-            HAVING COUNT(t.id) > 0
-            ORDER BY u.name
-        `, params);
-
-        const rows = result.rows.map(row => {
-            const totalDue = Number(row.total_due);
-            const completedOnTime = Number(row.completed_on_time);
-            const negative = Number(row.negative);
-
-            return {
-                doer_id: row.doer_id,
-                doer_name: row.doer_name,
-                total_due: totalDue,
-                completed_on_time: completedOnTime,
-                negative,
-                non_negative: Number(row.non_negative),
-                pending_review: Number(row.pending_review),
-                wkndot_percentage: totalDue > 0 ? Math.round((completedOnTime / totalDue) * 100) : 0,
-                negative_rate: totalDue > 0 ? Math.round((negative / totalDue) * 100) : 0,
-                avg_delay: row.avg_delay !== null ? Number(row.avg_delay) : null,
-                max_delay: row.max_delay !== null ? Number(row.max_delay) : null
-            };
-        });
+        const rows = await fetchWkndotSummary(
+            weekParams.week_start,
+            weekParams.week_end,
+            req.query.doer_id
+        );
 
         res.json(rows);
 
@@ -1059,84 +1191,11 @@ app.get("/api/wkndot/report", async (req, res) => {
         const { week_start, week_end } = weekParams;
         const { doer_id } = req.query;
 
-        const params = [week_start, week_end];
-        let doerClause = "";
+        const summary = await fetchWkndotSummary(week_start, week_end, doer_id);
 
-        if (doer_id) {
-            params.push(doer_id);
-            doerClause = ` AND u.id = $${params.length}`;
-        }
-
-        const summaryResult = await pool.query(`
-            SELECT
-                u.id AS doer_id,
-                u.name AS doer_name,
-                COUNT(t.id) AS total_due,
-                COUNT(*) FILTER (
-                    WHERE t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date
-                ) AS completed_on_time,
-                COUNT(*) FILTER (WHERE wr.decision = 'Negative') AS negative,
-                COUNT(*) FILTER (WHERE wr.decision = 'Non-Negative') AS non_negative,
-                COUNT(*) FILTER (
-                    WHERE wr.decision IS NULL
-                      AND NOT (t.status = 'Completed' AND t.updated_at::date <= t.original_planned_date)
-                ) AS pending_review,
-                ROUND(AVG(
-                    CASE
-                        WHEN t.status = 'Completed' AND t.updated_at::date > t.original_planned_date
-                            THEN (t.updated_at::date - t.original_planned_date)
-                    END
-                ), 1) AS avg_delay,
-                MAX(
-                    CASE
-                        WHEN t.status = 'Completed' AND t.updated_at::date > t.original_planned_date
-                            THEN (t.updated_at::date - t.original_planned_date)
-                    END
-                ) AS max_delay
-            FROM users u
-            JOIN tasks t
-                ON t.user_id = u.id
-               AND t.original_planned_date BETWEEN $1 AND $2
-            LEFT JOIN wkndot_reviews wr
-                ON wr.task_id = t.id AND wr.week_start = $1
-            WHERE u.role = 'Doer'
-            ${doerClause}
-            GROUP BY u.id, u.name
-            HAVING COUNT(t.id) > 0
-            ORDER BY u.name
-        `, params);
-
-        const summary = summaryResult.rows.map(row => {
-            const totalDue = Number(row.total_due);
-            const completedOnTime = Number(row.completed_on_time);
-            const negative = Number(row.negative);
-
-            return {
-                doer_id: row.doer_id,
-                doer_name: row.doer_name,
-                total_due: totalDue,
-                completed_on_time: completedOnTime,
-                negative,
-                non_negative: Number(row.non_negative),
-                pending_review: Number(row.pending_review),
-                wkndot_percentage: totalDue > 0 ? Math.round((completedOnTime / totalDue) * 100) : 0,
-                negative_rate: totalDue > 0 ? Math.round((negative / totalDue) * 100) : 0,
-                avg_delay: row.avg_delay !== null ? Number(row.avg_delay) : null,
-                max_delay: row.max_delay !== null ? Number(row.max_delay) : null
-            };
-        });
-
-        let tasks = [];
-
-        if (doer_id) {
-            const taskResult = await pool.query(`
-                ${WKNDOT_TASK_ROW_SQL}
-                AND t.user_id = $3
-                ORDER BY t.original_planned_date
-            `, [week_start, week_end, doer_id]);
-
-            tasks = taskResult.rows;
-        }
+        const tasks = doer_id
+            ? await fetchWkndotTasks(week_start, week_end, doer_id)
+            : [];
 
         res.json({
             week_start,
