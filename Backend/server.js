@@ -177,9 +177,9 @@ const WKNDOT_DATE_SQL = `COALESCE(
         SELECT tr.previous_planned_date
         FROM task_revisions tr
         WHERE tr.task_id = t.id
-          AND tr.previous_planned_date BETWEEN $1::date AND $2::date
-          AND tr.revision_date > $2::date
-          AND tr.revision_date <= ($2::date + 7)
+          AND tr.previous_planned_date BETWEEN $2::date AND $3::date
+AND tr.revision_date > $3::date
+AND tr.revision_date <= ($3::date + 7)
         ORDER BY tr.revision_date DESC, tr.revision_number DESC
         LIMIT 1
     ),
