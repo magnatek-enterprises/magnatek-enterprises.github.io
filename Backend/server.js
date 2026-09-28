@@ -172,21 +172,21 @@ function normalizeWkndotDecision(value) {
 
 const WKNDOT_GRACE_DAYS = 2;
 
-const WKNDOT_DATE_SQL = `COALESCE(
-    (
-        SELECT tr.previous_planned_date
-        FROM task_revisions tr
-        WHERE tr.task_id = t.id
-          AND tr.previous_planned_date BETWEEN $2::date AND $3::date
-AND tr.revision_date > $3::date
-AND tr.revision_date <= ($3::date + 7)
-        ORDER BY tr.revision_date DESC, tr.revision_number DESC
-        LIMIT 1
-    ),
-    CASE
-        WHEN COALESCE(t.total_revisions, 0) = 0 THEN t.planned_date
-        ELSE COALESCE(t.original_planned_date, t.planned_date)
-    END
+const WKNDOT_REVIEW_DATE_SQL = `COALESCE(
+  (
+    SELECT tr.previous_planned_date
+    FROM task_revisions tr
+    WHERE tr.task_id = t.id
+      AND tr.previous_planned_date BETWEEN $2::date AND $3::date
+      AND tr.revision_date > $3::date
+      AND tr.revision_date <= ($3::date + 7)
+    ORDER BY tr.revision_date DESC, tr.revision_number DESC
+    LIMIT 1
+  ),
+  CASE
+    WHEN COALESCE(t.total_revisions, 0) = 0 THEN t.planned_date
+    ELSE COALESCE(t.original_planned_date, t.planned_date)
+  END
 )`;
 
 const WKNDOT_COMPLETED_SQL =
@@ -1131,7 +1131,7 @@ app.post("/api/wkndot/review", async (req, res) => {
         const taskResult = await pool.query(`
             SELECT
                 t.id,
-                (${WKNDOT_DATE_SQL} BETWEEN $2::date AND $3::date) AS in_week
+                (${WKNDOT_REVIEW_DATE_SQL}) BETWEEN $2::date AND $3::date) AS in_week
             FROM tasks t
             WHERE t.id = $1
         `, [task_id, week_start, week_end]);
