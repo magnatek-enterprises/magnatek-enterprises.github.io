@@ -916,20 +916,14 @@ async function reviseTask(id) {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const task = await response.json();
-        // Keep the browser's WKNDOT week calculation aligned with the server:
-        // a never-revised task belongs to its current planned date;
-        // once revised, original_planned_date is the retained first commitment.
-        const originalDate = Number(task.total_revisions || 0) === 0
-            ? task.planned_date
-            : (task.original_planned_date || task.planned_date);
 
-        if (!originalDate) return;
+        // Same rule as the server: the WKNDOT week is the week of the
+        // date the task is being moved FROM (its current planned_date).
+        const movedFromDate = task.planned_date;
 
-        // The WKNDOT decision belongs to the task's commitment week.
-        // It must therefore be shown even when the revision is being
-        // made after that week has ended (for example, a Saturday task
-        // revised on Monday). The server is the final authority.
-        const taskWeek = wkndotWeekOf(parseISODateUTC(originalDate));
+        if (!movedFromDate) return;
+
+        const taskWeek = wkndotWeekOf(parseISODateUTC(movedFromDate));
 
         reviseWkndotState.required = true;
         reviseWkndotState.weekStart = taskWeek.start;
@@ -2125,10 +2119,6 @@ function renderWkndotSingleDoer() {
 
 function wkndotTaskStatusBlock(task) {
 
-    if (task.completed_on_time) {
-        return `<span class="badge completed">Completed On Time</span>`;
-    }
-
     if (task.review_status === "Negative") {
         return `<span class="wkndot-decided-chip negative">Negative</span>`;
     }
@@ -2212,7 +2202,7 @@ async function submitWkndotReview(taskId, reviewStatus) {
         const data = await response.json();
 
         if (!response.ok) {
-            throw new Error(data.error || "Failed to save WKNDOT decision");
+            throw new Error(data.detail ? `${data.error}: ${data.detail}` : (data.error || "Failed to save WKNDOT decision"));
         }
 
         showToast(`Marked as ${reviewStatus}.`, "success");
