@@ -1406,7 +1406,6 @@ app.get("/api/dashboard/summary", async (req, res) => {
 // ===============================
 // DASHBOARD: DOER PERFORMANCE
 // ===============================
-
 app.get("/api/dashboard/doers", async (req, res) => {
 
     try {
@@ -1414,9 +1413,8 @@ app.get("/api/dashboard/doers", async (req, res) => {
         const { from, to } = req.query;
         const hasRange = Boolean(from && to);
 
-        const dateWhere = hasRange
-            ? `WHERE t.planned_date >= $1
-               AND t.planned_date < ($2::date + INTERVAL '1 day')`
+        const taskWhere = hasRange
+            ? `AND t.planned_date BETWEEN $1 AND $2`
             : "";
 
         const params = hasRange ? [from, to] : [];
@@ -1448,7 +1446,8 @@ app.get("/api/dashboard/doers", async (req, res) => {
             LEFT JOIN users u
                 ON u.id = t.user_id
 
-            ${dateWhere}
+            WHERE 1 = 1
+            ${taskWhere}
 
             GROUP BY
                 u.id,
@@ -1461,7 +1460,7 @@ app.get("/api/dashboard/doers", async (req, res) => {
 
         `, params);
 
-        const candidates = result.rows.map(row => {
+        const doers = result.rows.map(row => {
 
             const total = Number(row.total_assigned);
             const completed = Number(row.completed);
@@ -1490,7 +1489,7 @@ app.get("/api/dashboard/doers", async (req, res) => {
             };
         });
 
-        res.json(candidates);
+        res.json(doers);
 
     } catch (error) {
 
@@ -1503,7 +1502,6 @@ app.get("/api/dashboard/doers", async (req, res) => {
     }
 
 });
-
 
 // ===============================
 // DASHBOARD: REVISION STATISTICS
