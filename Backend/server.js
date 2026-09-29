@@ -16,7 +16,24 @@ app.use(express.json());
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL
 });
+app.get("/api/debug/db", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT
+                current_database() AS database_name,
+                current_user AS database_user,
+                COUNT(*) AS total_tasks
+            FROM tasks
+        `);
 
+        res.json(result.rows[0]);
+    } catch (error) {
+        console.error("DB DEBUG ERROR:", error);
+        res.status(500).json({
+            error: error.message
+        });
+    }
+});
 
 // ===============================
 // SCHEMA CHECK (runs once on boot)
@@ -172,22 +189,7 @@ function normalizeWkndotDecision(value) {
 
 const WKNDOT_GRACE_DAYS = 2;
 
-const WKNDOT_DATE_SQL = `COALESCE(
-    (
-        SELECT tr.previous_planned_date
-        FROM task_revisions tr
-        WHERE tr.task_id = t.id
-          AND tr.previous_planned_date BETWEEN $1::date AND $2::date
-          AND tr.revision_date > $2::date
-          AND tr.revision_date <= ($2::date + 7)
-        ORDER BY tr.revision_date DESC, tr.revision_number DESC
-        LIMIT 1
-    ),
-    CASE
-        WHEN COALESCE(t.total_revisions, 0) = 0 THEN t.planned_date
-        ELSE COALESCE(t.original_planned_date, t.planned_date)
-    END
-)`;
+const WKNDOT_DATE_SQL = `COALESCE(t.original_planned_date, t.planned_date)`;
 
 const WKNDOT_COMPLETED_SQL =
     `(t.status = 'Completed' AND t.updated_at::date <= ($2::date + ${WKNDOT_GRACE_DAYS}))`;
@@ -220,28 +222,14 @@ const WKNDOT_COMPLETED_LATE_SQL =
 // >>> the two, or to weight them, this is the one line to change.
 // ---------------------------------------------------------
 
-// Weight of each WKNDOT decision, as a fraction of one task.
-// Change these two numbers to change the formula everywhere.
-//   Negative revision      = 100% impact
-//   Non-Negative revision  =  25% impact
-//   Completed / Pending    =   0% impact (pending is not counted
-//                                         against anyone yet)
-const WKNDOT_WEIGHTS = { negative: 1.0, nonNegative: 0.25 };
+function computeWkndotScores({ totalDue, completed, negative, revised }) {
 
-const round2 = (n) => Math.round(n * 100) / 100;
+    const greenScore = totalDue > 0 ? Math.round((completed / totalDue) * 100) : 0;
+    const actualRedScore = totalDue > 0 ? Math.round((negative / totalDue) * 100) : 0;
+    const revisionRedScore = totalDue > 0 ? Math.round((revised / totalDue) * 100) : 0;
+    const finalRedScore = Math.max(actualRedScore, revisionRedScore);
 
-// WKNDOT % = weighted impact / total tasks x 100
-function computeWkndotScores({ totalDue, negative, nonNegative }) {
-
-    const weightedImpact = round2(
-        negative * WKNDOT_WEIGHTS.negative +
-        nonNegative * WKNDOT_WEIGHTS.nonNegative
-    );
-
-    const wkndotPercentage = totalDue > 0 ? round2((weightedImpact / totalDue) * 100) : 0;
-    const negativeRate = totalDue > 0 ? round2((negative / totalDue) * 100) : 0;
-
-    return { weightedImpact, wkndotPercentage, negativeRate };
+    return { greenScore, actualRedScore, revisionRedScore, finalRedScore };
 }
 
 
@@ -321,9 +309,40 @@ app.get("/api/users", async (req, res) => {
 
 app.get("/api/doers", async (req, res) => {
     try {
-        const result = await pool.query(
-            "SELECT id, name, phone FROM users WHERE role = 'Doer' ORDER BY name"
-        );
+        // Filter-only doer list: only people who actually have tasks.
+        // If duplicate user records exist (for example "Driver Keshavan"
+        // and "Driver Keshavan - 9391033125"), keep one canonical record.
+        const result = await pool.query(`
+            WITH candidates AS (
+                SELECT
+                    u.id,
+                    u.name,
+                    u.phone,
+                    regexp_replace(trim(u.name), '\s*-\s*\d{7,15}\s*$', '') AS canonical_name,
+                    COUNT(t.id) AS task_count,
+                    CASE
+                        WHEN trim(u.name) ~ '\d{7,15}\s*$' THEN 1
+                        WHEN COALESCE(trim(u.phone), '') <> '' THEN 1
+                        ELSE 0
+                    END AS has_number
+                FROM users u
+                JOIN tasks t ON t.user_id = u.id
+                WHERE u.role = 'Doer'
+                  AND u.active = true
+                GROUP BY u.id, u.name, u.phone
+            ), ranked AS (
+                SELECT *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY lower(canonical_name)
+                        ORDER BY has_number DESC, task_count DESC, id ASC
+                    ) AS rn
+                FROM candidates
+            )
+            SELECT id, name, phone
+            FROM ranked
+            WHERE rn = 1
+            ORDER BY name
+        `);
 
         res.json(result.rows);
     } catch (error) {
@@ -578,40 +597,6 @@ app.get("/api/tasks/:id", async (req, res) => {
 
 
 // ===============================
-// WKNDOT DECISION SAVE (shared by revise + review routes)
-//
-// UPDATE first, INSERT only if nothing was updated. Works with any
-// UNIQUE constraint on wkndot_reviews, so it can never raise
-// "no unique or exclusion constraint matching the ON CONFLICT
-// specification" (42P10). `db` is a pool OR a checked-out client.
-// ===============================
-
-async function saveWkndotDecision(db, taskId, weekStart, weekEnd, decision) {
-
-    const updated = await db.query(`
-        UPDATE wkndot_reviews
-        SET decision = $3,
-            week_end = $4,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE task_id = $1 AND week_start = $2
-        RETURNING task_id, week_start, week_end, decision AS review_status
-    `, [taskId, weekStart, decision, weekEnd]);
-
-    if (updated.rows.length > 0) return updated.rows[0];
-
-    const inserted = await db.query(`
-        INSERT INTO wkndot_reviews
-            (task_id, week_start, week_end, decision)
-        VALUES
-            ($1, $2, $3, $4)
-        RETURNING task_id, week_start, week_end, decision AS review_status
-    `, [taskId, weekStart, weekEnd, decision]);
-
-    return inserted.rows[0];
-}
-
-
-// ===============================
 // REVISE TASK
 // ===============================
 
@@ -672,6 +657,7 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
         if (taskResult.rows.length === 0) {
 
             await client.query("ROLLBACK");
+
             return res.status(404).json({
                 error: "Task not found"
             });
@@ -680,29 +666,22 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
 
         const currentTask = taskResult.rows[0];
 
-        // WKNDOT is tied to the commitment that is being revised, not
-        // only to the calendar week in which the revision happens.
-        // Therefore a task due last Saturday and revised today still
-        // needs a decision for last Saturday's WKNDOT week.
-        //
-        // For a task with no previous revision, planned_date is the
-        // commitment date. Once a task has revisions, the first/original
-        // commitment is retained in original_planned_date.
-        const commitmentDate = currentTask.planned_date || currentTask.original_planned_date;
+        const originalDate = currentTask.planned_date || currentTask.original_planned_date;
+
 
         const weekResult = await client.query(`
             SELECT
                 ${weekStartSQL("$1::date")} AS task_week_start,
-                ${weekEndSQL("$1::date")}   AS task_week_end
-        `, [commitmentDate]);
+                ${weekEndSQL("$1::date")}   AS task_week_end,
+                ${weekStartSQL("CURRENT_DATE")} AS current_week_start
+        `, [originalDate]);
 
         const weekRow = weekResult.rows[0];
         const taskWeekStart = weekRow.task_week_start;
         const taskWeekEnd = weekRow.task_week_end;
 
-        // Every revision of a task with a valid commitment date gets a
-        // WKNDOT decision for the week containing that commitment.
-        const needsWkndotDecision = Boolean(taskWeekStart && taskWeekEnd);
+        const needsWkndotDecision =
+            toISODate(taskWeekStart) === toISODate(weekRow.current_week_start);
 
         let wkndotOutcome = null;
 
@@ -729,6 +708,7 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
                 if (!normalizedDecision) {
 
                     await client.query("ROLLBACK");
+
                     return res.status(409).json({
                         error: "A WKNDOT decision is required for this revision",
                         wkndot_required: true,
@@ -738,11 +718,43 @@ app.put("/api/tasks/:id/revise", async (req, res) => {
 
                 }
 
-                const saved = await saveWkndotDecision(
-                    client, id, toISODate(taskWeekStart), toISODate(taskWeekEnd), normalizedDecision
-                );
+                try {
 
-                wkndotOutcome = saved.review_status;
+                    await client.query(`
+                        INSERT INTO wkndot_reviews
+                            (task_id, week_start, week_end, decision)
+                        VALUES
+                            ($1, $2, $3, $4)
+                        ON CONFLICT (task_id, week_start)
+                        DO UPDATE SET
+                            decision = EXCLUDED.decision,
+                            week_end = EXCLUDED.week_end,
+                            updated_at = CURRENT_TIMESTAMP
+                    `, [id, taskWeekStart, taskWeekEnd, normalizedDecision]);
+
+                    wkndotOutcome = normalizedDecision;
+
+                } catch (wkndotInsertError) {
+
+                    // Safety net: a genuine 23505 (unique_violation)
+                    // is treated as "someone already decided this" and
+                    // the stored decision is reused, instead of failing
+                    // the whole revision over WKNDOT bookkeeping.
+                    if (wkndotInsertError.code === "23505") {
+
+                        const retry = await client.query(`
+                            SELECT decision FROM wkndot_reviews WHERE task_id = $1 AND week_start = $2
+                        `, [id, taskWeekStart]);
+
+                        wkndotOutcome = retry.rows.length > 0 ? retry.rows[0].decision : normalizedDecision;
+
+                    } else {
+
+                        throw wkndotInsertError;
+
+                    }
+
+                }
 
             }
 
@@ -921,7 +933,7 @@ async function fetchWkndotTasks(weekStart, weekEnd, doerId) {
             ${WKNDOT_COMPLETED_SQL} AS completed_on_time,
             ${WKNDOT_COMPLETED_SQL} AS completed_in_window,
             ${WKNDOT_COMPLETED_LATE_SQL} AS completed_late,
-            (wr.decision IS NULL) AS pending_review,
+            (${WKNDOT_COMPLETED_SQL} AND wr.decision IS NULL) AS pending_review,
             CASE
                 WHEN t.status = 'Completed' AND ${WKNDOT_DELAY_SQL} > 0
                     THEN ${WKNDOT_DELAY_SQL}
@@ -979,18 +991,17 @@ async function fetchWkndotSummary(weekStart, weekEnd, doerId) {
             u.id AS doer_id,
             u.name AS doer_name,
             COUNT(t.id) AS total_due,
+            COUNT(*) FILTER (WHERE ${WKNDOT_COMPLETED_SQL}) AS completed,
             COUNT(*) FILTER (
-                WHERE wr.decision = 'Negative'
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision = 'Negative'
             ) AS negative,
             COUNT(*) FILTER (
-                WHERE wr.decision = 'Non-Negative'
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision = 'Non-Negative'
             ) AS non_negative,
             COUNT(*) FILTER (
-                WHERE wr.decision IS NULL AND t.status = 'Completed'
-            ) AS completed,
-            COUNT(*) FILTER (
-                WHERE wr.decision IS NULL AND t.status <> 'Completed'
+                WHERE ${WKNDOT_COMPLETED_SQL} AND wr.decision IS NULL
             ) AS pending_review,
+            COUNT(*) FILTER (WHERE NOT ${WKNDOT_COMPLETED_SQL}) AS open_tasks,
             COUNT(*) FILTER (WHERE t.total_revisions > 0) AS revised,
             ROUND(AVG(
                 CASE WHEN ${WKNDOT_COMPLETED_LATE_SQL} THEN ${WKNDOT_DELAY_SQL} END
@@ -1025,11 +1036,10 @@ async function fetchWkndotSummary(weekStart, weekEnd, doerId) {
         const totalDue = Number(row.total_due);
         const completed = Number(row.completed);
         const negative = Number(row.negative);
-        const nonNegative = Number(row.non_negative);
-        const pending = Number(row.pending_review);
+        const revised = Number(row.revised);
 
-        const { weightedImpact, wkndotPercentage, negativeRate } =
-            computeWkndotScores({ totalDue, negative, nonNegative });
+        const { greenScore, actualRedScore, revisionRedScore, finalRedScore } =
+            computeWkndotScores({ totalDue, completed, negative, revised });
 
         return {
             doer_id: row.doer_id,
@@ -1038,17 +1048,16 @@ async function fetchWkndotSummary(weekStart, weekEnd, doerId) {
             completed,
             completed_on_time: completed,
             negative,
-            non_negative: nonNegative,
-            pending_review: pending,
-            open_tasks: pending,
-            revised_tasks: Number(row.revised),
-            weighted_impact: weightedImpact,
-            wkndot_percentage: wkndotPercentage,
-            negative_rate: negativeRate,
-            weights: {
-                negative: WKNDOT_WEIGHTS.negative * 100,
-                non_negative: WKNDOT_WEIGHTS.nonNegative * 100
-            },
+            non_negative: Number(row.non_negative),
+            pending_review: Number(row.pending_review),
+            open_tasks: Number(row.open_tasks),
+            revised_tasks: revised,
+            wkndot_percentage: greenScore,
+            negative_rate: actualRedScore,
+            green_score: greenScore,
+            actual_red_score: actualRedScore,
+            revision_red_score: revisionRedScore,
+            final_red_score: finalRedScore,
             avg_delay: row.avg_delay !== null ? Number(row.avg_delay) : null,
             max_delay: row.max_delay !== null ? Number(row.max_delay) : null
         };
@@ -1139,30 +1148,13 @@ app.post("/api/wkndot/review", async (req, res) => {
         // The task must belong to the given week by the same WKNDOT
         // date definition used everywhere else, so a decision can
         // never be filed under the wrong week.
-        // Parameter order MUST match every other WKNDOT query, because
-        // WKNDOT_DATE_SQL hard-codes $1 = week_start and $2 = week_end:
-        //   $1 = week_start, $2 = week_end, $3 = task id.
-        // (Previously task_id was $1, which produced "bigint = date".)
         const taskResult = await pool.query(`
             SELECT
                 t.id,
-                (
-                    EXTRACT(ISODOW FROM $1::date) = 1
-                    AND $2::date = $1::date + 5
-                    AND (
-                        ${WKNDOT_DATE_SQL} BETWEEN $1::date AND $2::date
-                        OR EXISTS (
-                            SELECT 1
-                            FROM task_revisions tr
-                            WHERE tr.task_id = t.id
-                              AND tr.previous_planned_date BETWEEN $1::date AND $2::date
-                              AND tr.revision_date BETWEEN $2::date AND ($2::date + 7)
-                        )
-                    )
-                ) AS in_week
+                (${WKNDOT_DATE_SQL} BETWEEN $2::date AND $3::date) AS in_week
             FROM tasks t
-            WHERE t.id = $3
-        `, [week_start, week_end, task_id]);
+            WHERE t.id = $1
+        `, [task_id, week_start, week_end]);
 
         if (taskResult.rows.length === 0) {
             return res.status(404).json({ error: "Task not found" });
@@ -1170,11 +1162,51 @@ app.post("/api/wkndot/review", async (req, res) => {
 
         if (!taskResult.rows[0].in_week) {
             return res.status(400).json({
-                error: "This task does not belong to the given WKNDOT week"
+                error: "This task does not belong to the given WKNDOT week (based on its original planned date)"
             });
         }
 
-        const review = await saveWkndotDecision(pool, task_id, week_start, week_end, normalizedDecision);
+        let review;
+
+        try {
+
+            const result = await pool.query(`
+                INSERT INTO wkndot_reviews
+                    (task_id, week_start, week_end, decision)
+                VALUES
+                    ($1, $2, $3, $4)
+                ON CONFLICT (task_id, week_start)
+                DO UPDATE SET
+                    decision = EXCLUDED.decision,
+                    week_end = EXCLUDED.week_end,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING task_id, week_start, week_end, decision AS review_status
+            `, [task_id, week_start, week_end, normalizedDecision]);
+
+            review = result.rows[0];
+
+        } catch (wkndotInsertError) {
+
+            // Same (task_id, week_start) upsert as in the revise
+            // route, with the same defensive fallback for a genuine
+            // 23505 race.
+            if (wkndotInsertError.code === "23505") {
+
+                const retry = await pool.query(`
+                    SELECT task_id, week_start, week_end, decision AS review_status
+                    FROM wkndot_reviews
+                    WHERE task_id = $1 AND week_start = $2
+                `, [task_id, week_start]);
+
+                review = retry.rows[0];
+
+            } else {
+
+                throw wkndotInsertError;
+
+            }
+
+        }
 
         res.json({
             success: true,
@@ -1349,7 +1381,6 @@ app.get("/api/tasks", async (req, res) => {
 // ===============================
 // DASHBOARD: SUMMARY COUNTS
 // ===============================
-
 app.get("/api/dashboard/summary", async (req, res) => {
 
     try {
@@ -1357,23 +1388,30 @@ app.get("/api/dashboard/summary", async (req, res) => {
         const { from, to } = req.query;
         const hasRange = Boolean(from && to);
 
+        const dateWhere = hasRange
+            ? `WHERE t.planned_date >= $1
+               AND t.planned_date < ($2::date + INTERVAL '1 day')`
+            : "";
+
+        const params = hasRange ? [from, to] : [];
+
         const result = await pool.query(`
             SELECT
                 COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = 'Completed') AS completed,
-                COUNT(*) FILTER (WHERE status = 'Pending') AS pending,
-                COUNT(*) FILTER (WHERE status = 'Week Shifted') AS week_shifted,
+                COUNT(*) FILTER (WHERE t.status = 'Completed') AS completed,
+                COUNT(*) FILTER (WHERE t.status = 'Pending') AS pending,
+                COUNT(*) FILTER (WHERE t.status = 'Week Shifted') AS week_shifted,
                 COUNT(*) FILTER (
-                    WHERE status = 'Pending'
-                    AND planned_date = CURRENT_DATE
+                    WHERE t.status = 'Pending'
+                    AND t.planned_date = CURRENT_DATE
                 ) AS due_today,
                 COUNT(*) FILTER (
-                    WHERE status = 'Pending'
-                    AND planned_date < CURRENT_DATE
+                    WHERE t.status <> 'Completed'
+                    AND t.planned_date < CURRENT_DATE
                 ) AS overdue
-            FROM tasks
-            ${hasRange ? "WHERE planned_date BETWEEN $1 AND $2" : ""}
-        `, hasRange ? [from, to] : []);
+            FROM tasks t
+            ${dateWhere}
+        `, params);
 
         const row = result.rows[0];
 
@@ -1409,42 +1447,87 @@ app.get("/api/dashboard/doers", async (req, res) => {
 
         const { from, to } = req.query;
         const hasRange = Boolean(from && to);
+        const taskWhere = hasRange
+            ? `AND (
+                    COALESCE(t.original_planned_date, t.planned_date) BETWEEN $1 AND $2
+                    OR EXISTS (
+                        SELECT 1
+                        FROM task_revisions tr2
+                        WHERE tr2.task_id = t.id
+                          AND tr2.previous_planned_date BETWEEN $1 AND $2
+                    )
+                )`
+            : "";
+        const params = hasRange ? [from, to] : [];
 
         const result = await pool.query(`
             SELECT
                 u.id,
                 u.name,
+                u.phone,
                 COUNT(t.id) AS total_assigned,
                 COUNT(t.id) FILTER (WHERE t.status = 'Completed') AS completed,
-                COUNT(t.id) FILTER (WHERE t.status = 'Pending') AS pending,
-                COUNT(t.id) FILTER (WHERE t.status = 'Week Shifted') AS week_shifted
+                COUNT(t.id) FILTER (WHERE t.status = 'Week Shifted') AS revised,
+                COUNT(t.id) FILTER (
+                    WHERE t.status <> 'Completed'
+                    AND t.status <> 'Week Shifted'
+                    AND t.planned_date < CURRENT_DATE
+                ) AS overdue
             FROM users u
             LEFT JOIN tasks t
                 ON t.user_id = u.id
-                ${hasRange ? "AND t.planned_date BETWEEN $1 AND $2" : ""}
-            GROUP BY u.id, u.name
-            ORDER BY total_assigned DESC, u.name ASC
-        `, hasRange ? [from, to] : []);
+                ${taskWhere}
+            WHERE u.role = 'Doer'
+              AND u.active = true
+            GROUP BY u.id, u.name, u.phone
+        `, params);
 
-        const doers = result.rows.map(row => {
-
+        const candidates = result.rows.map(row => {
             const total = Number(row.total_assigned);
             const completed = Number(row.completed);
+            const revised = Number(row.revised);
+            const pending = Math.max(0, total - completed - revised);
 
             return {
                 id: row.id,
                 name: row.name,
+                phone: row.phone,
                 total_assigned: total,
                 completed,
-                pending: Number(row.pending),
-                week_shifted: Number(row.week_shifted),
+                pending,
+                overdue: Number(row.overdue),
+                revised,
                 completion_percentage:
                     total > 0
                         ? Math.round((completed / total) * 100)
                         : 0
             };
-
         });
+
+        // Remove duplicate user records. Prefer the record that carries
+        // the workload, then the record with a phone/numbered name.
+        const unique = new Map();
+        for (const d of candidates) {
+            const canonical = String(d.name || "")
+                .trim()
+                .replace(/\s*-\s*\d{7,15}\s*$/, "")
+                .toLowerCase();
+
+            const existing = unique.get(canonical);
+            const dScore = (d.phone ? 1000000000 : 0) + d.total_assigned * 100000 + d.revised * 100;
+            const eScore = existing
+                ? (existing.phone ? 1000000000 : 0) + existing.total_assigned * 100000 + existing.revised * 100
+                : -1;
+
+            if (!existing || dScore > eScore) unique.set(canonical, d);
+        }
+
+        const doers = [...unique.values()]
+            .filter(d => d.total_assigned > 0)
+            .sort((a, b) => {
+                if (b.total_assigned !== a.total_assigned) return b.total_assigned - a.total_assigned;
+                return String(a.name).localeCompare(String(b.name));
+            });
 
         res.json(doers);
 
@@ -1587,12 +1670,9 @@ app.get("/api/dashboard/doers/:id/history", async (req, res) => {
         const summaryResult = await pool.query(`
             SELECT
                 COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status = 'Completed') AS completed,
-                COUNT(*) FILTER (WHERE status = 'Pending') AS pending,
-                COUNT(*) FILTER (WHERE status = 'Week Shifted') AS week_shifted,
-                COUNT(*) FILTER (WHERE total_revisions > 0) AS revised,
+                COUNT(*) FILTER (WHERE status <> 'Completed') AS pending,
                 COUNT(*) FILTER (
-                    WHERE status = 'Pending'
+                    WHERE status <> 'Completed'
                     AND planned_date < CURRENT_DATE
                 ) AS overdue
             FROM tasks
@@ -1602,7 +1682,10 @@ app.get("/api/dashboard/doers/:id/history", async (req, res) => {
 
         const row = summaryResult.rows[0];
         const total = Number(row.total);
-        const completed = Number(row.completed);
+        // For individual history, only two buckets matter: done or not done.
+        // Week Shifted/revised are not separate summary categories.
+        const pending = Number(row.pending);
+        const completed = Math.max(0, total - pending);
 
         const tasksResult = await pool.query(`
             SELECT
@@ -1627,9 +1710,7 @@ app.get("/api/dashboard/doers/:id/history", async (req, res) => {
             summary: {
                 total,
                 completed,
-                pending: Number(row.pending),
-                week_shifted: Number(row.week_shifted),
-                revised: Number(row.revised),
+                pending,
                 overdue: Number(row.overdue),
                 completion_percentage:
                     total > 0
